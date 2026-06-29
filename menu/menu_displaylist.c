@@ -136,6 +136,11 @@
 #include "../core_backup.h"
 #include "../misc/cpufreq/cpufreq.h"
 #include "../input/input_remapping.h"
+/* === ROM_LIBRARY BEGIN === */
+#ifdef HAVE_NETWORKING
+#include "../rom_library/rom_library_menu.h"
+#endif
+/* === ROM_LIBRARY END === */
 
 #ifdef HAVE_MICROPHONE
 #include "../audio/microphone_driver.h"
@@ -12623,6 +12628,17 @@ bool menu_displaylist_ctl(enum menu_displaylist_ctl_state type,
       int ret                     = 0;
       switch (type)
       {
+/* === ROM_LIBRARY BEGIN === */
+#ifdef HAVE_NETWORKING
+         case DISPLAYLIST_ROM_LIBRARY_SYSTEMS:
+         case DISPLAYLIST_ROM_LIBRARY_ENTRIES:
+         case DISPLAYLIST_ROM_LIBRARY_SETTINGS:
+            menu_entries_clear(info->list);
+            count = rom_library_menu_displaylist(info, (unsigned)type);
+            info->flags |= MD_FLAG_NEED_REFRESH | MD_FLAG_NEED_PUSH;
+            break;
+#endif
+/* === ROM_LIBRARY END === */
          case DISPLAYLIST_NETWORK_HOSTING_SETTINGS_LIST:
 #ifdef HAVE_NETWORKING
             {
@@ -15673,6 +15689,11 @@ bool menu_displaylist_ctl(enum menu_displaylist_ctl_state type,
                            PARSE_ACTION, false) == 0)
                      count++;
 #endif /* HAVE_ONLINE_UPDATER */
+
+/* === ROM_LIBRARY BEGIN === */
+               if (!settings->bools.kiosk_mode_enable)
+                  count += rom_library_menu_append_main_entry(info->list);
+/* === ROM_LIBRARY END === */
 #endif /* HAVE_NETWORKING */
 
 #ifdef HAVE_MIST

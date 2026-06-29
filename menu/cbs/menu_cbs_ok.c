@@ -115,6 +115,12 @@
 #include "../../steam/steam.h"
 #endif
 
+/* === ROM_LIBRARY BEGIN === */
+#ifdef HAVE_NETWORKING
+#include "../../rom_library/rom_library_menu.h"
+#endif
+/* === ROM_LIBRARY END === */
+
 enum
 {
    ACTION_OK_LOAD_PRESET = 0,
@@ -10304,6 +10310,16 @@ int menu_cbs_init_bind_ok(menu_file_list_cbs_t *cbs,
       return -1;
 
    BIND_ACTION_OK(cbs, action_ok_lookup_setting);
+
+/* === ROM_LIBRARY BEGIN === */
+#ifdef HAVE_NETWORKING
+   if (rom_library_menu_enum_is_ours(cbs->enum_idx))
+   {
+      BIND_ACTION_OK(cbs, rom_library_menu_action_ok);
+      return 0;
+   }
+#endif
+/* === ROM_LIBRARY END === */
 
    if (menu_cbs_init_bind_ok_compare_label(cbs, label) == 0)
       return 0;

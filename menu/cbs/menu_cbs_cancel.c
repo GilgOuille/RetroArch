@@ -26,6 +26,12 @@
 #endif
 #include "../../msg_hash_lbl_str.h"
 
+/* === ROM_LIBRARY BEGIN === */
+#ifdef HAVE_NETWORKING
+#include "../../rom_library/rom_library_menu.h"
+#endif
+/* === ROM_LIBRARY END === */
+
 #ifndef BIND_ACTION_CANCEL
 #define BIND_ACTION_CANCEL(cbs, name) (cbs)->action_cancel = (name)
 #endif
@@ -246,6 +252,20 @@ int menu_cbs_init_bind_cancel(menu_file_list_cbs_t *cbs,
    if (cbs)
    {
       BIND_ACTION_CANCEL(cbs, action_cancel_pop_default);
+
+/* === ROM_LIBRARY BEGIN === */
+#ifdef HAVE_NETWORKING
+      /* Our rows use FILE_TYPE_DOWNLOAD_URL to render their alt text, but that
+       * type otherwise binds action_cancel_core_content (which flushes the
+       * stack back to the content menu). Keep the plain one-level Back for our
+       * own entries. */
+      if (rom_library_menu_enum_is_ours(cbs->enum_idx))
+      {
+         BIND_ACTION_CANCEL(cbs, action_cancel_pop_default);
+         return 0;
+      }
+#endif
+/* === ROM_LIBRARY END === */
 
       if (menu_cbs_init_bind_cancel_compare_label(cbs, label) == 0)
          return 0;

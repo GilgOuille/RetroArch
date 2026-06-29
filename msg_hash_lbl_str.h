@@ -1639,4 +1639,14 @@
 #define MENU_ENUM_LABEL_SMB_CLIENT_TIMEOUT_STR "smb_client_timeout"
 #define MENU_ENUM_LABEL_SMB_CLIENT_BROWSE_STR "smb_client_browse"
 
+/* === ROM_LIBRARY BEGIN === */
+#define MENU_ENUM_LABEL_ROM_LIBRARY_LIST_STR "rom_library_list"
+#define MENU_ENUM_LABEL_ROM_LIBRARY_SETTINGS_STR "rom_library_settings"
+#define MENU_ENUM_LABEL_DEFERRED_ROM_LIBRARY_ENTRIES_STR "deferred_rom_library_entries"
+#define MENU_ENUM_LABEL_ROM_LIBRARY_ENTRY_STR "rom_library_entry"
+#define MENU_ENUM_LABEL_ROM_LIBRARY_SETTING_URL_STR "rom_library_setting_url"
+#define MENU_ENUM_LABEL_ROM_LIBRARY_SETTING_USERNAME_STR "rom_library_setting_username"
+#define MENU_ENUM_LABEL_ROM_LIBRARY_SETTING_PASSWORD_STR "rom_library_setting_password"
+/* === ROM_LIBRARY END === */
+
 #endif /* MSG_HASH_LBL_STR_H__ */

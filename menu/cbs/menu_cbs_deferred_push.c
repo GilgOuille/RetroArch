@@ -36,6 +36,12 @@
 #include "../../verbosity.h"
 #include "../../msg_hash_lbl_str.h"
 
+/* === ROM_LIBRARY BEGIN === */
+#ifdef HAVE_NETWORKING
+#include "../../rom_library/rom_library_menu.h"
+#endif
+/* === ROM_LIBRARY END === */
+
 enum
 {
    PUSH_ARCHIVE_OPEN_DETECT_CORE = 0,
@@ -1232,6 +1238,16 @@ int menu_cbs_init_bind_deferred_push(menu_file_list_cbs_t *cbs,
       return -1;
 
    BIND_ACTION_DEFERRED_PUSH(cbs, deferred_push_default);
+
+/* === ROM_LIBRARY BEGIN === */
+#ifdef HAVE_NETWORKING
+   if (rom_library_menu_label_is_deferred(label))
+   {
+      BIND_ACTION_DEFERRED_PUSH(cbs, rom_library_menu_deferred_push);
+      return 0;
+   }
+#endif
+/* === ROM_LIBRARY END === */
 
    if (cbs->enum_idx != MENU_ENUM_LABEL_PLAYLIST_ENTRY &&
        menu_cbs_init_bind_deferred_push_compare_label(cbs, label) == 0)
