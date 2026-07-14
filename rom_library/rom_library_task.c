@@ -508,6 +508,168 @@ static void rom_library_archive_extract_dir(
    fill_pathname_join_special(out, dir, name, out_len);
 }
 
+/****************************/
+/* SBI subchannel sidecars  */
+/* A .sbi carries the libcrypt subchannel data some PAL PSX discs need; it is  */
+/* NOT content (no playlist entry, no scan) and only works when it sits right  */
+/* next to the disc image it patches, under the same base name. Our layout     */
+/* puts an extracted ROM in <downloads>/<system>/<stem>/, so the .sbi has to be */
+/* copied in there. The .sbi is ALWAYS also kept at the system root where it   */
+/* was downloaded: that is what rom_library_task_entry_is_present() sees, so   */
+/* the "✓" marker keeps working with no extra case, and a plain-file ROM       */
+/* (.chd, .cue…) already has the .sbi as its sibling there.                    */
+/****************************/
+
+static bool rom_library_path_is_sbi(const char *path)
+{
+   const char *ext = (path && *path) ? path_get_extension(path) : NULL;
+
+   return ext && *ext && string_is_equal_case_insensitive(ext, "sbi");
+}
+
+/* Looks for a file named <stem>.<ext> directly inside dir, comparing base name
+ * and extension case-insensitively (the server may ship "GAME.SBI", and the
+ * target filesystem may be case-sensitive). When ext is NULL, matches any file
+ * sharing the stem whose extension is NOT "sbi" — i.e. "the ROM this .sbi
+ * belongs to, downloaded as a plain file". out (optional) gets the full path. */
+static bool rom_library_find_stem_file(const char *dir, const char *stem,
+      const char *ext, char *out, size_t out_len)
+{
+   struct string_list *files = dir_list_new(dir, NULL, false, false, false,
+         false /* not recursive */);
+   bool                found = false;
+   size_t              i;
+
+   if (!files)
+      return false;
+
+   for (i = 0; i < files->size && !found; i++)
+   {
+      const char *path = files->elems[i].data;
+      const char *fext = path ? path_get_extension(path) : NULL;
+      char        base[PATH_MAX_LENGTH];
+
+      if (!fext || !*fext)
+         continue;
+
+      if (ext)
+      {
+         if (!string_is_equal_case_insensitive(fext, ext))
+            continue;
+      }
+      else if (string_is_equal_case_insensitive(fext, "sbi"))
+         continue;
+
+      fill_pathname_base(base, path, sizeof(base));
+      path_remove_extension(base);
+
+      if (!string_is_equal_case_insensitive(base, stem))
+         continue;
+
+      found = true;
+      if (out && out_len)
+         strlcpy(out, path, out_len);
+   }
+
+   string_list_free(files);
+   return found;
+}
+
+/* Copies src into dir, keeping its file name. Single read/write: an .sbi is a
+ * few kB at most. */
+static bool rom_library_copy_into_dir(const char *src, const char *dir)
+{
+   char     dest[PATH_MAX_LENGTH];
+   char     base[PATH_MAX_LENGTH];
+   void    *buf = NULL;
+   int64_t  len = 0;
+   bool     ok;
+
+   fill_pathname_base(base, src, sizeof(base));
+   fill_pathname_join_special(dest, dir, base, sizeof(dest));
+
+   if (filestream_read_file(src, &buf, &len) != 1 || !buf)
+      return false;
+
+   ok = filestream_write_file(dest, buf, len);
+   free(buf);
+   return ok;
+}
+
+/* Post-download handling of a freshly fetched .sbi (main thread). Writes the OSD
+ * text into msg, its severity into category, and returns the message length; the
+ * caller pushes it. The scan pipeline is skipped by the caller: not content. */
+static size_t rom_library_sbi_install(const char *sbi_path,
+      char *msg, size_t msg_len, enum message_queue_category *category)
+{
+   char sys_dir[PATH_MAX_LENGTH];
+   char rom_dir[PATH_MAX_LENGTH];
+   char stem[PATH_MAX_LENGTH];
+
+   fill_pathname_basedir(sys_dir, sbi_path, sizeof(sys_dir));
+   fill_pathname_base(stem, sbi_path, sizeof(stem));
+   path_remove_extension(stem);
+   /* Same derivation as an archive's extraction dir: <sys_dir>/<stem>. */
+   rom_library_archive_extract_dir(sbi_path, rom_dir, sizeof(rom_dir));
+
+   *category = MESSAGE_QUEUE_CATEGORY_INFO;
+
+   /* The ROM was an archive: it lives in its extraction directory (the archive
+    * itself was removed), so the .sbi has to be duplicated in there. */
+   if (path_is_directory(rom_dir))
+   {
+      if (rom_library_copy_into_dir(sbi_path, rom_dir))
+      {
+         RARCH_LOG("[ROMLib] SBI installed: %s -> %s\n", sbi_path, rom_dir);
+         snprintf(msg, msg_len, "SBI installed: %.200s", stem);
+         return strlen(msg);
+      }
+
+      RARCH_ERR("[ROMLib] SBI copy failed: %s -> %s\n", sbi_path, rom_dir);
+      *category = MESSAGE_QUEUE_CATEGORY_ERROR;
+      snprintf(msg, msg_len, "SBI: could not copy into %.200s", stem);
+      return strlen(msg);
+   }
+
+   /* The ROM was downloaded as a plain file (.chd, .cue…): it sits in the system
+    * folder, where the .sbi has just landed — already beside it, nothing to do. */
+   if (rom_library_find_stem_file(sys_dir, stem, NULL, NULL, 0))
+   {
+      RARCH_LOG("[ROMLib] SBI kept next to its ROM in %s\n", sys_dir);
+      snprintf(msg, msg_len, "SBI installed: %.200s", stem);
+      return strlen(msg);
+   }
+
+   /* No ROM at all. The .sbi stays at the system root: downloading the ROM later
+    * picks it up (rom_library_sbi_attach_to_dir), so this is only a warning. */
+   RARCH_WARN("[ROMLib] SBI without ROM; download \"%s\" first.\n", stem);
+   *category = MESSAGE_QUEUE_CATEGORY_WARNING;
+   snprintf(msg, msg_len, "SBI: download the ROM \"%.200s\" first", stem);
+   return strlen(msg);
+}
+
+/* Reverse case: a ROM archive was just extracted into rom_dir while its .sbi had
+ * already been downloaded (and left at the system root). Copy it in now, so the
+ * order in which the two files are fetched does not matter. */
+static void rom_library_sbi_attach_to_dir(const char *rom_dir)
+{
+   char sys_dir[PATH_MAX_LENGTH];
+   char stem[PATH_MAX_LENGTH];
+   char sbi_path[PATH_MAX_LENGTH];
+
+   fill_pathname_basedir(sys_dir, rom_dir, sizeof(sys_dir));
+   fill_pathname_base(stem, rom_dir, sizeof(stem));
+
+   if (!rom_library_find_stem_file(sys_dir, stem, "sbi",
+            sbi_path, sizeof(sbi_path)))
+      return;
+
+   if (rom_library_copy_into_dir(sbi_path, rom_dir))
+      RARCH_LOG("[ROMLib] SBI installed: %s -> %s\n", sbi_path, rom_dir);
+   else
+      RARCH_ERR("[ROMLib] SBI copy failed: %s -> %s\n", sbi_path, rom_dir);
+}
+
 /* Builds the local destination path for entry: <downloads>/<system>/<filename>.
  * Returns false if no download directory is configured. Creates nothing. MUST
  * stay in sync with the dest path built in rom_library_task_push_download(). */
@@ -1262,6 +1424,9 @@ static void rom_library_decompress_callback(retro_task_t *task,
       RARCH_LOG("[ROMLib] decompressed %s -> %s; removing archive.\n",
             st->archive_path, st->extract_dir);
       filestream_delete(st->archive_path);
+      /* Pull in an .sbi downloaded before its ROM (it waits at the system root).
+       * Done before the scan, which ignores .sbi as a sidecar extension anyway. */
+      rom_library_sbi_attach_to_dir(st->extract_dir);
       pipeline_owns_lock =
             rom_library_pipeline_start(st->system, st->extract_dir);
    }
@@ -1328,18 +1493,26 @@ static void rom_library_download_callback(retro_task_t *task,
    size_t      len;
    bool        pipeline_owns_lock = false;
    const char *name = (st && st->label) ? st->label : "ROM";
+   enum message_queue_category category = MESSAGE_QUEUE_CATEGORY_INFO;
 
    if (st && st->rc == ROM_LIBRARY_HTTP_OK)
    {
       len = snprintf(msg, sizeof(msg), "Downloaded: %s", name);
       RARCH_LOG("[ROMLib] download OK: %s -> %s\n", name,
             st->dest_path ? st->dest_path : "?");
+      /* An .sbi is a subchannel sidecar, not content: it must be duplicated
+       * inside the directory of the ROM it patches, and never scanned (a LOOSE
+       * scan would add it to the playlist as a game). No pipeline, so the
+       * single-download lock is released right below. */
+      if (rom_library_path_is_sbi(st->dest_path))
+         len = rom_library_sbi_install(st->dest_path, msg, sizeof(msg),
+               &category);
       /* Workflow: if the download is a known archive, decompress it first
        * (into <ROM name>/, then delete the archive); the decompress task then
        * runs the post-download pipeline. Otherwise, or if extraction cannot be
        * started, scan the downloaded file directly (phase 5 behaviour). Either
        * way the single-download lock is handed onward and released downstream. */
-      if (rom_library_path_is_archive(st->dest_path)
+      else if (rom_library_path_is_archive(st->dest_path)
             && rom_library_decompress_start(st->sys_name, st->dest_path))
          pipeline_owns_lock = true;
       else
@@ -1359,7 +1532,7 @@ static void rom_library_download_callback(retro_task_t *task,
    }
 
    runloop_msg_queue_push(msg, len, 1, 180, true, NULL,
-         MESSAGE_QUEUE_ICON_DEFAULT, MESSAGE_QUEUE_CATEGORY_INFO);
+         MESSAGE_QUEUE_ICON_DEFAULT, category);
 
    /* Release the single-download lock unless the post-download pipeline took it
     * over (it then clears it when the playlist registration completes). */
