@@ -983,11 +983,15 @@ static bool rom_library_task_push_thumbnail_watch(
 
 /* Sidecar / metadata files an archive may ship next to the ROM: never content,
  * and in a LOOSE scan every listed file that reaches the playlist becomes an
- * entry, so keep them out of the extension filter below. */
+ * entry, so keep them out of the extension filter below.
+ *
+ * Only list extensions no libretro core claims as content: "md" for instance
+ * looks like Markdown but is the canonical Mega Drive cartridge extension, and
+ * skipping it left the extracted folder with no scannable file at all. */
 static bool rom_library_ext_is_sidecar(const char *ext)
 {
    static const char *skip[] = {
-      "txt", "nfo", "diz", "md", "html", "htm", "xml", "log", "ini", "dat",
+      "txt", "nfo", "diz", "html", "htm", "xml", "log", "ini", "dat",
       "sfv", "md5", "sha1", "jpg", "jpeg", "png", "gif", "bmp", "pdf",
       "sbi", "cu2", "sub", "ccd", NULL
    };
