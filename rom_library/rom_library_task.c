@@ -36,6 +36,7 @@
 #include "rom_library_task.h"
 #include "rom_library_config.h"
 #include "rom_library_http.h"
+#include "rom_library_unzip.h"
 #include "rom_library_webdav.h"
 #include "rom_library_menu.h"
 
@@ -1438,6 +1439,79 @@ static void rom_library_decompress_callback(retro_task_t *task,
    rom_library_menu_tick_refresh();
 }
 
+/* Streaming progress + cancellation for our own ZIP extractor, called from the
+ * worker thread. Returns false to abort (task was cancelled). */
+static bool rom_library_extract_progress(
+      void *user_data, int64_t done, int64_t total)
+{
+   retro_task_t *task = (retro_task_t*)user_data;
+
+   if (!task)
+      return true;
+
+   if (task_get_flags(task) & RETRO_TASK_FLG_CANCELLED)
+      return false;
+
+   if (total > 0)
+      task_set_progress(task, (int8_t)((done * 100) / total));
+   else
+      task_set_progress(task, -1);
+
+   return true;
+}
+
+/* Worker thread: runs the streaming ZIP extraction. On failure the error is set
+ * on the task, which routes rom_library_decompress_callback into its existing
+ * "scan the archive as-is" fallback. */
+static void rom_library_extract_handler(retro_task_t *task)
+{
+   rom_library_decompress_state_t *st =
+         (rom_library_decompress_state_t*)task->state;
+   enum rom_library_unzip_status rc;
+
+   if (!st)
+   {
+      task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
+      return;
+   }
+
+   rc = rom_library_unzip_extract(st->archive_path, st->extract_dir,
+         rom_library_extract_progress, task);
+
+   if (rc != ROM_LIBRARY_UNZIP_OK)
+   {
+      const char *msg = rom_library_unzip_strerror(rc);
+      RARCH_ERR("[ROMLib] extraction failed (%s): %s\n", msg, st->archive_path);
+      task_set_error(task, strdup(msg));
+   }
+
+   task_set_progress(task, 100);
+   task_set_flags(task, RETRO_TASK_FLG_FINISHED, true);
+}
+
+/* Queues our streaming ZIP extraction. Shares rom_library_decompress_callback
+ * (and therefore the lock handover) with the upstream path. */
+static bool rom_library_unzip_push(
+      rom_library_decompress_state_t *st, const char *label)
+{
+   retro_task_t *task;
+   char          title[256];
+
+   if (!(task = task_init()))
+      return false;
+
+   snprintf(title, sizeof(title), "Extracting %s", label);
+
+   task->handler   = rom_library_extract_handler;
+   task->callback  = rom_library_decompress_callback;
+   task->state     = st;
+   task->user_data = st;     /* what the shared callback reads */
+   task->title     = strdup(title);
+   task->progress  = 0;
+
+   return task_queue_push(task);
+}
+
 /* Pushes an extraction of archive_path. Returns true when the decompress task
  * was queued and now owns the single-download lock (its callback releases or
  * hands it on); false if the archive is unsupported or the task could not be
@@ -1447,7 +1521,7 @@ static bool rom_library_decompress_start(
 {
    rom_library_decompress_state_t *st;
    char  extract_dir[PATH_MAX_LENGTH];
-   void *t;
+   bool  pushed;
 
    rom_library_archive_extract_dir(archive_path, extract_dir,
          sizeof(extract_dir));
@@ -1466,14 +1540,21 @@ static bool rom_library_decompress_start(
    st->archive_path = strdup(archive_path);
    st->extract_dir  = strdup(extract_dir);
 
-   /* valid_ext=NULL -> extract every member. mute=false -> show the
-    * "Extracting: ..." OSD. task_push_decompress returns NULL for a format the
-    * build cannot handle (e.g. .rar), which we treat as "not decompressable". */
-   t = task_push_decompress(archive_path, extract_dir,
-         NULL, NULL, NULL,
-         rom_library_decompress_callback, st, NULL, false);
+   /* ZIP (and .apk, same container) goes through our own streaming extractor:
+    * upstream's cannot read a >4 GiB member at all (no ZIP64) and buffers the
+    * whole member in RAM, which no PS2-sized ISO survives. See
+    * rom_library_unzip.h. Everything else (7z, ...) keeps the upstream path,
+    * where task_push_decompress returns NULL for a format the build cannot
+    * handle (e.g. .rar) — our "not an archive" signal. */
+   if (rom_library_unzip_is_zip(archive_path))
+      pushed = rom_library_unzip_push(st,
+            path_basename_nocompression(archive_path));
+   else
+      pushed = (task_push_decompress(archive_path, extract_dir,
+                     NULL, NULL, NULL,
+                     rom_library_decompress_callback, st, NULL, false) != NULL);
 
-   if (!t)
+   if (!pushed)
    {
       RARCH_WARN("[ROMLib] archive not decompressable, scanning as-is: %s\n",
             archive_path);

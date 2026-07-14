@@ -3007,6 +3007,7 @@ ifeq ($(HAVE_NETWORKING), 1)
 OBJ += rom_library/rom_library.o \
        rom_library/rom_library_config.o \
        rom_library/rom_library_http.o \
+       rom_library/rom_library_unzip.o \
        rom_library/rom_library_webdav.o \
        rom_library/rom_library_task.o \
        rom_library/rom_library_menu.o

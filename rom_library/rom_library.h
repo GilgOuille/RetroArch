@@ -105,6 +105,17 @@ rom_library_entry_t *rom_library_add_entry(
       rom_library_system_t *system,
       const char *name, const char *href, int64_t size);
 
+/*******************/
+/* System helpers  */
+/*******************/
+
+/* Free disk space (bytes) on the volume holding dir, or -1 when unknown.
+ * libretro-common has no equivalent, and both multi-GB producers in this
+ * feature need it to fail early with a clear message rather than half-way
+ * through: the streaming download (rom_library_http.c) and the streaming
+ * ZIP extractor (rom_library_unzip.c). */
+int64_t rom_library_disk_free(const char *dir);
+
 RETRO_END_DECLS
 
 #endif /* __ROM_LIBRARY_H */

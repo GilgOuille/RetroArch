@@ -15,6 +15,33 @@
 
 #include "rom_library.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#elif defined(__linux__) || defined(__APPLE__) || defined(__unix__)
+#include <sys/statvfs.h>
+#define ROM_LIBRARY_HAVE_STATVFS 1
+#endif
+
+int64_t rom_library_disk_free(const char *dir)
+{
+#ifdef _WIN32
+   ULARGE_INTEGER freeb;
+   const char *d = (dir && *dir) ? dir : ".";
+   if (GetDiskFreeSpaceExA(d, &freeb, NULL, NULL))
+      return (int64_t)freeb.QuadPart;
+   return -1;
+#elif defined(ROM_LIBRARY_HAVE_STATVFS)
+   struct statvfs vfs;
+   const char *d = (dir && *dir) ? dir : ".";
+   if (statvfs(d, &vfs) == 0)
+      return (int64_t)vfs.f_bavail * (int64_t)vfs.f_frsize;
+   return -1;
+#else
+   (void)dir;
+   return -1;
+#endif
+}
+
 struct rom_library
 {
    rom_library_system_t *systems;       /* Growable array of systems. */

@@ -39,14 +39,8 @@
 
 #include "verbosity.h"
 
+#include "rom_library.h"
 #include "rom_library_http.h"
-
-#ifdef _WIN32
-#include <windows.h>
-#elif defined(__linux__) || defined(__APPLE__) || defined(__unix__)
-#include <sys/statvfs.h>
-#define ROM_LIBRARY_HAVE_STATVFS 1
-#endif
 
 /* Fixed reception buffer: the whole point of this client. Reused for every
  * chunk so the memory budget stays flat regardless of file size. */
@@ -93,27 +87,6 @@ static const uint8_t *rl_memfind(const uint8_t *hay, size_t hlen,
          return hay + i;
    }
    return NULL;
-}
-
-/* Free disk space (bytes) for the volume holding dir, or -1 if unknown. */
-static int64_t rl_disk_free(const char *dir)
-{
-#ifdef _WIN32
-   ULARGE_INTEGER freeb;
-   const char *d = (dir && *dir) ? dir : ".";
-   if (GetDiskFreeSpaceExA(d, &freeb, NULL, NULL))
-      return (int64_t)freeb.QuadPart;
-   return -1;
-#elif defined(ROM_LIBRARY_HAVE_STATVFS)
-   struct statvfs vfs;
-   const char *d = (dir && *dir) ? dir : ".";
-   if (statvfs(d, &vfs) == 0)
-      return (int64_t)vfs.f_bavail * (int64_t)vfs.f_frsize;
-   return -1;
-#else
-   (void)dir;
-   return -1;
-#endif
 }
 
 /* Builds "Authorization: Basic <base64(user:pass)>\r\n" (malloc'd), or NULL
@@ -815,7 +788,7 @@ static enum rom_library_http_status rl_dl_on_headers(
    if (!string_is_empty(basedir) && !path_is_directory(basedir))
       path_mkdir(basedir);
 
-   freeb = rl_disk_free(basedir);
+   freeb = rom_library_disk_free(basedir);
    if (freeb >= 0 && freeb < total)
    {
       RARCH_ERR("[ROMLib] Not enough disk space: need %lld, have %lld.\n",

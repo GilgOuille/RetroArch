@@ -19,6 +19,7 @@ ifeq ($(HAVE_NETWORKING), 1)
 OBJ += rom_library/rom_library.o \
        rom_library/rom_library_config.o \
        rom_library/rom_library_http.o \
+       rom_library/rom_library_unzip.o \
        rom_library/rom_library_webdav.o \
        rom_library/rom_library_task.o \
        rom_library/rom_library_menu.o
@@ -81,3 +82,5 @@ Chaque page navigable est poussée comme **liste générique différée** (`gene
 ## 4. Fichiers upstream explicitement NON modifiés
 
 `net_http.c`, `net_socket*.c`, `configuration.c`, `menu_setting.c` (CLAUDE.md §2) : toute la logique réseau/réglages est réécrite sous `rom_library/` sur les API publiques. Côté build, `griffin/griffin.c` (§1). Seule exception assumée : `Makefile.common`, seul moyen d'exister dans la build officielle.
+
+S'y ajoutent, pour la **décompression** : `libretro-common/file/archive_file*.c` (backend ZIP sans ZIP64 et qui bufferise le membre entier en RAM) et `libretro-common/vfs/vfs_implementation.c` (`fseek((long)offset)` → offsets plafonnés à 2 Gio sur Windows/MinGW). Les deux sont **inutilisables** pour nos ROMs multi-Go, et les corriger imposerait un diff transversal sur une API partagée (`archive_file.h` : `csize`/`size` en `uint32_t`, 3 backends, plusieurs appelants). D'où `rom_library_unzip.c` — même raisonnement que `rom_library_http.c` face à `net_http.c`. Voir CLAUDE.md §5.

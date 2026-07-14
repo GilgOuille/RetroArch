@@ -23,11 +23,12 @@ Le fork doit suivre `master` upstream sans calvaire de merge : **tout le code da
 
 ```
 rom_library/
-├── rom_library.c/.h          # modèle catalogue (singleton rom_library_get_global()) + état
+├── rom_library.c/.h          # modèle catalogue (singleton rom_library_get_global()) + état + rom_library_disk_free()
 ├── rom_library_webdav.c/.h   # PROPFIND : parsing rxml
 ├── rom_library_http.c/.h     # client HTTPS autonome (net_socket + net_socket_ssl) : GET streaming + PROPFIND
+├── rom_library_unzip.c/.h    # extracteur ZIP autonome : ZIP64, streaming disque, int64_t
 ├── rom_library_config.c/.h   # rom_library.cfg (url/username/password)
-├── rom_library_task.c/.h     # tâches async : listing, download, pipeline post-DL, watcher vignette
+├── rom_library_task.c/.h     # tâches async : listing, download, extraction, pipeline post-DL, watcher vignette
 ├── rom_library_menu.c/.h     # displaylists + callbacks (nav, OSK)
 └── INTEGRATION.md
 ```
@@ -35,6 +36,10 @@ rom_library/
 ## 3. Contraintes techniques structurantes
 
 - **Client HTTP maison obligatoire** : `net_http.c` bufferise tout le corps en RAM, cape à 256 Mio (`NET_HTTP_MAX_CONTENT_LENGTH`) et compte en `size_t` (déborde à 4 Go en 32 bits) → inutilisable pour des ROMs multi-Go sur RPi. `rom_library_http.c` streame vers disque : **compteurs `int64_t` uniquement**, buffer de réception fixe, `.part` → rename atomique, précheck d'espace disque, annulation coopérative. Validé octet-parfait jusqu'à **7,5 Gio** (ZIP64).
+- **Décompresseur ZIP maison obligatoire**, pour deux raisons cumulées (mêmes symptômes que ci-dessus, cause différente) — `rom_library_unzip.c`, cf. §5 :
+  1. `libretro-common/file/archive_file_zlib.c` **ignore le ZIP64** (lit `size`/`csize` en `uint32_t` depuis le central directory) et **`malloc()` le membre décompressé entier en RAM** avant de l'écrire ;
+  2. le **VFS lui-même plafonne à 2 Gio** sur Windows/MinGW (voir §5).
+  Notre extracteur : ZIP64, `int64_t`, `inflate` par chunks écrits au fil de l'eau (**~384 Kio de RAM quelle que soit la taille**), CRC32 vérifié, `.part` → rename atomique, précheck disque, annulation coopérative, refus des noms en `..` (path traversal). Validé octet-parfait sur des ISO PS2 de **4,65 Gio**.
 - **Réglages dans `rom_library.cfg`** (pas `retroarch.cfg`) : `rom_library_url`, `rom_library_username`, `rom_library_password`. Saisie OSK ; mot de passe masqué à l'affichage mais **stocké en clair** (comme Cloud Sync).
 - **Auth Basic** sur chaque requête (PROPFIND + GET), base64 via `encodings/base64.h` (modèle : `network/cloud_sync/webdav.c`). HTTPS fourni par `HAVE_BUILTINMBEDTLS` (§4).
 - **Tout passe par la `task_queue`**, jamais le thread principal. Callbacks sur thread worker → copier les chaînes avant push, **jamais de pointeur catalogue cross-thread**.
@@ -88,9 +93,21 @@ pacman -Syuu && pacman -S --needed base-devel git zip mingw-w64-x86_64-toolchain
 - Rafraîchissement live des marqueurs (« ↓ » en cours / « ✓ » présent) via `retro_task::progress_cb` (thread principal, throttlé 1 s) + un refresh final ; ne rafraîchit que si le haut de pile est la page ROMs.
 - **Annuler un download = re-valider OK sur la ROM** (pas de task manager dans ce build). Localiser la tâche par `(sys_index, rom_index)` via `task_queue_find`, puis **annuler HORS du finder** : `find` tient `running_lock` que `cancel` reprendrait → **deadlock**.
 
+**⚠️ PIÈGE MAJEUR — le VFS de RetroArch plafonne à 2 Gio (Windows/MinGW)**
+- `HAVE_64BIT_OFFSETS` **n'est défini nulle part** dans l'arbre, et `ATLEAST_VC2005` ne l'est pas en MinGW. `retro_vfs_file_seek_internal()` retombe donc sur **`fseek(fp, (long)offset, whence)`** et `retro_vfs_file_tell_impl()` sur **`ftell()`** — or `long` fait **32 bits** sur Windows (LLP64). Conséquence : `filestream_seek()` au-delà de **2 Gio** tronque silencieusement, et `filestream_tell()`/`filestream_get_size()` renvoient **-1**.
+- Symptôme observé : sur un `.zip` de 3,2 Go, impossible d'atteindre le central directory (situé tout à la fin) → l'archive est vue comme « pas un ZIP ». **Rien dans le code ne le laisse deviner** ; seul un test sur un vrai fichier > 2 Gio le révèle.
+- Nos écritures ne sont **pas** affectées (le download comme l'extraction écrivent **séquentiellement**, sans `seek` — d'où les 7,5 Gio validés). Seules les **lectures à offset** le sont.
+- Règle : **tout code du fork qui doit `seek`/`tell` dans un fichier potentiellement > 2 Gio n'utilise pas `filestream_*`** mais du stdio 64 bits (`fopen_utf8` + `_fseeki64`/`_ftelli64`, `fseeko`/`ftello` ailleurs, `_FILE_OFFSET_BITS 64` avant les includes pour le RPi 32 bits). C'est ce que fait `rom_library_unzip.c`. `filestream_delete`/`filestream_rename`/`path_mkdir` restent utilisables : ils travaillent sur des **chemins**, sans offset.
+
+**ZIP64 (`rom_library_unzip.c`)** — un ISO PS2 dépasse 4 Gio, donc **tous** les jeux PS2 (et bien d'autres) sont en ZIP64
+- Au-delà de 4 Gio (`0xFFFFFFFF`), les champs 32 bits du central directory **saturent** et la vraie valeur 64 bits vit dans le **champ extra `0x0001`**, qui ne contient **que** les champs saturés, **dans un ordre fixe** (uncompressed, compressed, offset du local header, disque). Sauter un champ présent décale tous les suivants.
+- Idem à l'échelle de l'archive : si l'EOCD sature, les vraies valeurs sont dans le **ZIP64 EOCD record**, atteint via le **locator** placé juste avant l'EOCD.
+- L'offset des données se calcule sur les longueurs `name`/`extra` du **local header**, qui ont le droit de différer de celles du central directory (source classique de corruption silencieuse).
+- Le **CRC32 du central directory est vérifié** en fin d'extraction : c'est la preuve de bout en bout que le chemin 64 bits est octet-parfait.
+
 **Pipeline post-download** (`rom_library_download_callback` succès → extraction → scan → playlist → vignette)
 - **Verrou unique `rom_library_download_busy`** : pris au push du download, **transmis** download → décompression → watcher, relâché dans le `cleanup` du watcher. **Toute branche qui n'enchaîne pas doit rendre le verrou**, sinon plus aucun download n'est possible.
-- **Décompression d'abord** : `task_push_decompress` vers un dossier frère `<ROM sans extension>/`, puis suppression de l'archive. Formats du build : **zip / apk / 7z** (`.rar` n'existe nulle part dans RetroArch). Format inconnu ⇒ `task_push_decompress` renvoie **NULL** → sert de test « ce n'est pas une archive » → repli : scanner le fichier tel quel.
+- **Décompression d'abord**, vers un dossier frère `<ROM sans extension>/`, puis suppression de l'archive. **Aiguillage sur la signature du fichier** (`rom_library_unzip_is_zip`, 4 premiers octets) : **ZIP/APK ⇒ `rom_library_unzip.c`** (notre tâche, seule capable du ZIP64 et du streaming) ; **tout le reste ⇒ `task_push_decompress`** upstream (7z ; `.rar` n'existe nulle part dans RetroArch). Les deux partagent le **même callback** `rom_library_decompress_callback`, donc le même passage de verrou. Non-archive ⇒ notre extracteur renvoie `NOT_ZIP` / `task_push_decompress` renvoie **NULL** → repli : scanner le fichier tel quel.
 - **⚠️ PIÈGE MAJEUR — `file_exts` vide ≠ « tout lister »** : `database_info_dir_init` substitue alors `core_info_list->all_ext` (extensions des **cores installés**) ⇒ système sans core = **liste vide** ⇒ le scan sort sans playlist, **sans erreur ni log**. Fix : `rom_library_collect_content_exts` liste le dossier extrait, déduplique les extensions, écarte les sidecars (`txt|nfo|jpg|sbi|sub|ccd|…`) et les écrit dans `file_exts_custom`. Orthogonal à *Scan Without Core Match* (qui n'agit qu'**après** le listing).
 - **Scan en mode LOOSE** avec `db_selection=SPECIFIC(<système>)` : l'entrée est ajoutée **même sans match `.rdb`**, avec `db_name=<système>` — **crucial**, car le menu en dérive le dossier des vignettes. `AUTOMATIC` force `db_usage=STRICT` ⇒ inutilisable ; en `CUSTOM`, les champs du `scan_settings` partagé **ne sont pas réinitialisés** → tout normaliser explicitement avant le push.
 - **`scan_without_core_match` est lu synchroniquement au push** → on le force à ON juste autour du push, puis on le restaure (sans toucher upstream ni la préférence utilisateur). Il lève le verrou *core installé* ; le LOOSE lève le verrou *match `.rdb`*.
